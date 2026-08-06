@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Call Me Daddy</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, sans-serif;
+      background: #0a0a0a; color: #fff;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      min-height: 100vh; padding: 20px;
+    }
+    #status { font-size: 18px; margin-bottom: 20px; color: #ff4d6a; }
+    #room-id { font-size: 24px; font-weight: bold; margin: 10px 0; color: #ff4d6a; }
+    button {
+      background: #ff4d6a; color: #fff; border: none;
+      padding: 14px 32px; font-size: 18px; border-radius: 12px;
+      cursor: pointer; margin: 10px; font-weight: bold;
+    }
+    button:disabled { opacity: 0.4; }
+    input {
+      padding: 12px 16px; font-size: 16px; border-radius: 8px;
+      border: 2px solid #333; background: #1a1a1a; color: #fff;
+      width: 260px; text-align: center; margin: 10px;
+    }
+    video { width: 90%; max-width: 400px; border-radius: 16px; margin: 10px; background: #111; }
+  </style>
+</head>
+<body>
+  <div id="status">Ready to connect</div>
+  <div id="room-id"></div>
+  <input id="room-input" placeholder="Enter Room ID" maxlength="20">
+  <br>
+  <button id="create-btn">Create Room</button>
+  <button id="join-btn">Join Room</button>
+  <button id="hangup-btn" disabled>Hang Up</button>
+  <audio id="remoteAudio" autoplay playsinline></audio>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let localStream, peerConnections = {};
+    const config = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+
+    const statusEl = document.getElementById('status');
+    const roomIdEl = document.getElementById('room-id');
+    const roomInput = document.getElementById('room-input');
+    const remoteAudio = document.getElementById('remoteAudio');
+
+    document.getElementById('create-btn').onclick = async () => {
+      const roomId = Math.random().toString(36).substring(2, 8);
+      await startCall(roomId);
+    };
+
+    document.getElementById('join-btn').onclick = async () => {
+      const roomId = roomInput.value.trim();
+      if (!roomId) return alert('Enter a room ID');
+      await startCall(roomId);
+    };
+
+    document.getElementById('hangup-btn').onclick = () => {
+      hangup();
+    };
+
+    async function startCall(roomId) {
+      statusEl.textContent = 'Requesting mic...';
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      roomIdEl.textContent = 'Room: ' + roomId;
+      document.getElementById('create-btn').disabled = true;
+      document.getElementById('join-btn').disabled = true;
+      document.getElementById('hangup-btn').disabled = false;
+      statusEl.textContent = 'Connected to room';
+
+      socket.emit('join-room', roomId);
+
+      socket.on('existing-participants', (ids) => {
+        ids.forEach(id => createPeerConnection(id, true));
+      });
+
+      socket.on('user-joined', (id) => {
+        statusEl.textContent = 'Partner joined!';
+        createPeerConnection(id, true);
+      });
+
+      socket.on('signal', async ({ from, signal }) => {
+        if (!peerConnections[from]) createPeerConnection(from, false);
+        const pc = peerConnections[from];
+        if (signal.sdp) await pc.setRemoteDescription(new RTCSessionDescription(signal.sdp));
+        if (signal.candidate) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+      });
+
+      socket.on('user-left', (id) => {
+        if (peerConnections[id]) {
+          peerConnections[id].close();
+          delete peerConnections[id];
+        }
+        statusEl.textContent = 'Partner left';
+      });
+    }
+
+    function createPeerConnection(peerId, isInitiator) {
+      const pc = new RTCPeerConnection(config);
+      peerConnections[peerId] = pc;
+
+      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+      pc.ontrack = (event) => {
+        remoteAudio.srcObject = event.streams[0];
+      };
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.emit('signal', { to: peerId, signal: { candidate: event.candidate } });
+        }
+      };
+
+      pc.onnegotiationneeded = async () => {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        socket.emit('signal', { to: peerId, signal: { sdp: pc.localDescription } });
+      };
+
+      if (isInitiator) {
+        pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => {
+          socket.emit('signal', { to: peerId, signal: { sdp: pc.localDescription } });
+        });
+      }
+    }
+
+    function hangup() {
+      Object.values(peerConnections).forEach(pc => pc.close());
+      peerConnections = {};
+      if (localStream) localStream.getTracks().forEach(t => t.stop());
+      remoteAudio.srcObject = null;
+      document.getElementById('create-btn').disabled = false;
+      document.getElementById('join-btn').disabled = false;
+      document.getElementById('hangup-btn').disabled = true;
+      roomIdEl.textContent = '';
+      statusEl.textContent = 'Ready to connect';
+    }
+  </script>
+</body>
+</html>
